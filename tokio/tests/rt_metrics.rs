@@ -1,8 +1,14 @@
+#![allow(unknown_lints, unexpected_cfgs)]
 #![warn(rust_2018_idioms)]
-#![cfg(all(feature = "full", tokio_unstable, not(target_os = "wasi")))]
+#![cfg(all(
+    feature = "full",
+    tokio_unstable,
+    not(target_os = "wasi"),
+    target_has_atomic = "64"
+))]
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::task::Poll;
 use tokio::macros::support::poll_fn;
 
@@ -22,6 +28,11 @@ fn num_workers() {
 #[test]
 fn num_blocking_threads() {
     let rt = current_thread();
+    assert_eq!(0, rt.metrics().num_blocking_threads());
+    let _ = rt.block_on(rt.spawn_blocking(move || {}));
+    assert_eq!(1, rt.metrics().num_blocking_threads());
+
+    let rt = threaded();
     assert_eq!(0, rt.metrics().num_blocking_threads());
     let _ = rt.block_on(rt.spawn_blocking(move || {}));
     assert_eq!(1, rt.metrics().num_blocking_threads());
@@ -82,20 +93,60 @@ fn blocking_queue_depth() {
 }
 
 #[test]
-fn active_tasks_count() {
+fn num_active_tasks() {
     let rt = current_thread();
     let metrics = rt.metrics();
-    assert_eq!(0, metrics.active_tasks_count());
-    rt.spawn(async move {
-        assert_eq!(1, metrics.active_tasks_count());
-    });
+    assert_eq!(0, metrics.num_active_tasks());
+    rt.block_on(rt.spawn(async move {
+        assert_eq!(1, metrics.num_active_tasks());
+    }))
+    .unwrap();
+
+    assert_eq!(0, rt.metrics().num_active_tasks());
 
     let rt = threaded();
     let metrics = rt.metrics();
-    assert_eq!(0, metrics.active_tasks_count());
-    rt.spawn(async move {
-        assert_eq!(1, metrics.active_tasks_count());
-    });
+    assert_eq!(0, metrics.num_active_tasks());
+    rt.block_on(rt.spawn(async move {
+        assert_eq!(1, metrics.num_active_tasks());
+    }))
+    .unwrap();
+
+    // try for 10 seconds to see if this eventually succeeds.
+    // wake_join() is called before the task is released, so in multithreaded
+    // code, this means we sometimes exit the block_on before the counter decrements.
+    for _ in 0..100 {
+        if rt.metrics().num_active_tasks() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(0, rt.metrics().num_active_tasks());
+}
+
+#[test]
+fn spawned_tasks_count() {
+    let rt = current_thread();
+    let metrics = rt.metrics();
+    assert_eq!(0, metrics.spawned_tasks_count());
+
+    rt.block_on(rt.spawn(async move {
+        assert_eq!(1, metrics.spawned_tasks_count());
+    }))
+    .unwrap();
+
+    assert_eq!(1, rt.metrics().spawned_tasks_count());
+
+    let rt = threaded();
+    let metrics = rt.metrics();
+    assert_eq!(0, metrics.spawned_tasks_count());
+
+    rt.block_on(rt.spawn(async move {
+        assert_eq!(1, metrics.spawned_tasks_count());
+    }))
+    .unwrap();
+
+    assert_eq!(1, rt.metrics().spawned_tasks_count());
 }
 
 #[test]
@@ -175,6 +226,7 @@ fn worker_noop_count() {
 }
 
 #[test]
+#[ignore] // this test is flaky, see https://github.com/tokio-rs/tokio/issues/6470
 fn worker_steal_count() {
     // This metric only applies to the multi-threaded runtime.
     //
@@ -502,7 +554,7 @@ fn worker_overflow_count() {
 }
 
 #[test]
-fn injection_queue_depth() {
+fn injection_queue_depth_current_thread() {
     use std::thread;
 
     let rt = current_thread();
@@ -516,44 +568,34 @@ fn injection_queue_depth() {
     .unwrap();
 
     assert_eq!(1, metrics.injection_queue_depth());
+}
 
+#[test]
+fn injection_queue_depth_multi_thread() {
     let rt = threaded();
-    let handle = rt.handle().clone();
     let metrics = rt.metrics();
 
-    // First we need to block the runtime workers
-    let (tx1, rx1) = std::sync::mpsc::channel();
-    let (tx2, rx2) = std::sync::mpsc::channel();
-    let (tx3, rx3) = std::sync::mpsc::channel();
-    let rx3 = Arc::new(Mutex::new(rx3));
+    let barrier1 = Arc::new(Barrier::new(3));
+    let barrier2 = Arc::new(Barrier::new(3));
 
-    rt.spawn(async move { rx1.recv().unwrap() });
-    rt.spawn(async move { rx2.recv().unwrap() });
-
-    // Spawn some more to make sure there are items
-    for _ in 0..10 {
-        let rx = rx3.clone();
+    // Spawn a task per runtime worker to block it.
+    for _ in 0..2 {
+        let barrier1 = barrier1.clone();
+        let barrier2 = barrier2.clone();
         rt.spawn(async move {
-            rx.lock().unwrap().recv().unwrap();
+            barrier1.wait();
+            barrier2.wait();
         });
     }
 
-    thread::spawn(move || {
-        handle.spawn(async {});
-    })
-    .join()
-    .unwrap();
+    barrier1.wait();
 
-    let n = metrics.injection_queue_depth();
-    assert!(1 <= n, "{}", n);
-    assert!(15 >= n, "{}", n);
-
-    for _ in 0..10 {
-        tx3.send(()).unwrap();
+    for i in 0..10 {
+        assert_eq!(i, metrics.injection_queue_depth());
+        rt.spawn(async {});
     }
 
-    tx1.send(()).unwrap();
-    tx2.send(()).unwrap();
+    barrier2.wait();
 }
 
 #[test]

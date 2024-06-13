@@ -1,3 +1,4 @@
+#![allow(unknown_lints, unexpected_cfgs)]
 #![allow(
     clippy::cognitive_complexity,
     clippy::large_enum_variant,
@@ -72,6 +73,9 @@
 
 #[macro_use]
 mod macros;
+
+mod poll_fn;
+pub(crate) use poll_fn::poll_fn;
 
 pub mod wrappers;
 

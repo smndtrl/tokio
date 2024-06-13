@@ -49,6 +49,7 @@ pub fn spawn<T>(task: T) -> Spawn<T> {
 /// Future spawned on a mock task that can be used to poll the future or stream
 /// without needing pinning or context types.
 #[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Spawn<T> {
     task: MockTask,
     future: Pin<Box<T>>,
@@ -146,6 +147,10 @@ impl<T: Stream> Stream for Spawn<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.future.as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.future.size_hint()
     }
 }
 
