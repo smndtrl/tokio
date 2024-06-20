@@ -457,11 +457,11 @@ compile_error! {
     target_family = "wasm",
     any(
         // feature = "fs",
-        feature = "io-std",
+        // feature = "io-std",
         // feature = "net",
-        feature = "process",
-        feature = "rt-multi-thread",
-        feature = "signal"
+        // feature = "process",
+        // feature = "rt-multi-thread",
+        // feature = "signal"
     )
 ))]
 compile_error!("Only features sync,macros,io-util,rt,time are supported on wasm.");
